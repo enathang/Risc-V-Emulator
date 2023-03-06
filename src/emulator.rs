@@ -1,4 +1,5 @@
 mod bus;
+mod csr;
 mod dram;
 mod errors;
 mod instructions;
@@ -7,17 +8,20 @@ pub struct Cpu {
     pub regs: [u64; 32],
     pub pc: u64,
     pub bus: bus::Bus,
+    pub csr: csr::Csr,
 }
 
 impl Cpu {
 
     pub fn new(code: Vec<u8>) -> Self {
-        let dram = dram::Dram{dram: code};
-        let bus = bus::Bus {dram: dram};
+        let dram = dram::Dram::new(code);
+        let bus = bus::Bus::new(dram);
+        let csr = csr::Csr::new();
         let mut cpu = Self { 
             regs: [0; 32], 
             pc: 0, 
             bus: bus,
+            csr: csr,
         };
 
         let MEMORY_SIZE = 1024*1024*128; // Define 10MiB memory
@@ -87,6 +91,14 @@ impl Cpu {
                 self.regs[inst.rd] = (imm << 12);
                 return self.pc + 4;
             }
+            0x73 => { // CSRRC
+                let csr = (inst.funct7 << 5) | inst.rs2;
+                let temp = self.csr.load(csr);
+                let csr_value = temp & !self.regs[inst.rs1];
+                self.csr.store(csr, csr_value);
+                self.regs[inst.rd] = temp;
+                return self.pc + 4;
+            }
             _ => {
                 println!("Not implemented");
                 println!("Op {} not implemented yet!", inst.opcode);
@@ -127,5 +139,22 @@ mod tests {
         let expected_register_value_bin = u32::from_str_radix(&expected_register_value, 2).unwrap();
 
         assert_eq!(expected_register_value_bin as u64, cpu.regs[29]);
+    }
+
+    #[test]
+    fn test_execute_csrrc() {
+        let mut cpu = Cpu::new(Vec::new());
+        cpu.csr.store(3, 1);
+
+        let inst = format!("{}{}{}{}{}", "000000000011", "00010", "011", "00001", "1110011");
+        let inst_bin = u32::from_str_radix(&inst, 2).unwrap();
+        let inst_obj = cpu.decode(inst_bin);
+        cpu.execute(inst_obj);
+
+        let expected_csr_value = 1;
+        let expected_reg_value = 1;
+
+        assert_eq!(expected_csr_value, cpu.csr.load(3));
+        assert_eq!(expected_reg_value, cpu.regs[1]);
     }
 }
