@@ -4,11 +4,17 @@ mod dram;
 mod errors;
 mod instructions;
 
+type Mode = u64;
+const User: Mode = 0; // 0b00
+const Supervisor: Mode = 1; // 0b01
+const Machine: Mode = 3; // 0b11
+
 pub struct Cpu {
     pub regs: [u64; 32],
     pub pc: u64,
     pub bus: bus::Bus,
     pub csr: csr::Csr,
+    pub mode: Mode,
 }
 
 impl Cpu {
@@ -17,11 +23,13 @@ impl Cpu {
         let dram = dram::Dram::new(code);
         let bus = bus::Bus::new(dram);
         let csr = csr::Csr::new();
+        let mode = Machine;
         let mut cpu = Self { 
             regs: [0; 32], 
             pc: 0, 
             bus: bus,
             csr: csr,
+            mode: mode,
         };
 
         let MEMORY_SIZE = 1024*1024*128; // Define 10MiB memory
@@ -74,13 +82,11 @@ impl Cpu {
         // Execute instruction 
         match(inst.opcode) {
             0x33 => { // ADD (Add rs1 and rs2)
-                println!("Add {} and {}!", inst.rs1, inst.rs2);
                 // TODO: Worry about overflow from addition
                 self.regs[inst.rd] = self.regs[inst.rs1] + self.regs[inst.rs2];
                 return self.pc + 4;
             }
             0x13 => { // ADDI (Add rs1 and intermediate value from register)
-                println!("AddI!");
                 let imm: u64 = ((inst.funct7 as u64) << 5) | inst.rs2 as u64; // Imm value is stored as [funct7][rs2]
                 // TODO: Worry about overflow from addition
                 self.regs[inst.rd] = imm + self.regs[inst.rs1];
@@ -91,13 +97,48 @@ impl Cpu {
                 self.regs[inst.rd] = (imm << 12);
                 return self.pc + 4;
             }
-            0x73 => { // CSRRC
-                let csr = (inst.funct7 << 5) | inst.rs2;
-                let temp = self.csr.load(csr);
-                let csr_value = temp & !self.regs[inst.rs1];
-                self.csr.store(csr, csr_value);
-                self.regs[inst.rd] = temp;
-                return self.pc + 4;
+            0x73 => { // Diff CSR instructions have the same OP code, but differing rs2/funct7
+                match(inst.rs2, inst.funct7) {
+                    (0x3, _) => { // csrrc
+                        let csr = (inst.funct7 << 5) | inst.rs2;
+                        let temp = self.csr.load(csr);
+                        let csr_value = temp & !self.regs[inst.rs1];
+                        self.csr.store(csr, csr_value);
+                        self.regs[inst.rd] = temp;
+                        return self.pc + 4;
+                    }
+                    (0x2, 0x8) => { // sret
+                        // Below is just fancy bit manipulation of sstatus to update certain flags
+                        let mut updated_sstatus = self.csr.load(csr::SSTATUS);
+                        
+                        // Set the current mode to be the SPP (supervisor previous privilege) bit,
+                        // which is either 0 for user or 1 for supervisor
+                        let SPP_FLAG_POS = 8; 
+                        self.mode = (updated_sstatus & (1 << SPP_FLAG_POS) >> SPP_FLAG_POS);
+                        
+                        // Set current IE (interrupt enabled) flag to be previous IE flag before
+                        // interrupt 
+                        let SPIE_FLAG_POS = 5;
+                        let SIE_FLAG_POS = 1;
+                        let spie = (updated_sstatus & (1 << SPIE_FLAG_POS) >> SPIE_FLAG_POS);
+                        updated_sstatus = (updated_sstatus & !(1 << SIE_FLAG_POS)) | (spie << SIE_FLAG_POS);
+                        
+                        // Set Previous IE to be 1
+                        updated_sstatus |= (1 << SPIE_FLAG_POS);
+                    
+                        // Set previous privilege mode to be user mode (which is lowest privilege)
+                        updated_sstatus &= !(1 << SPP_FLAG_POS);
+                        self.csr.store(csr::SSTATUS, updated_sstatus);
+
+                        // Return the program counter position before interrupt, to restore program
+                        let SEPC = 0x141; 
+                        return self.csr.load(SEPC) & !0b11;
+                    }
+                    (_, _) => {
+                        println!("CSR instruction not supported yet!");
+                        return self.pc + 4;
+                    }
+                }
             }
             _ => {
                 println!("Not implemented");
