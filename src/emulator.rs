@@ -78,6 +78,53 @@ impl Cpu {
         }
     }
 
+    pub fn handle_error(&mut self, error: errors::Exception) {
+        let mode = self.mode;
+        let pc = self.pc;
+
+        // Update privilege level
+        // - Check level's medeleg to see if should be s or m
+        let medeleg = self.csr.load(csr::MEDELEG);
+        let exception_index = error.code();
+        let should_deleg_to_supervisor = mode != Machine && (medeleg >> exception_index) & 1 == 1;
+
+        if (should_deleg_to_supervisor) {
+            self.mode = Supervisor;
+            // Save PC
+            self.csr.store(csr::SEPC, pc);
+            // Update PC to trap handler
+            self.pc = self.csr.load(csr::STVEC);
+
+            self.csr.store(csr::SCAUSE, error.code());
+            self.csr.store(csr::STVAL, error.value());
+        
+            let mut status = self.csr.load(csr::SSTATUS);
+            let ie = status & csr::MASK_SIE >> 1;
+            // First, we clear the flag bit, then we set it to new value
+            status = status & !csr::MASK_SPIE | (ie << 1);
+            let spp = mode;
+            status = status & !csr::MASK_SPP | (spp << 8);
+            self.csr.store(csr::SSTATUS, status);
+
+        } else { 
+            self.mode = Machine;
+            // Save PC
+            self.csr.store(csr::MEPC, pc);
+            // Update PC to trap handler
+            self.pc = self.csr.load(csr::MTVEC);
+            
+            self.csr.store(csr::MCAUSE, error.code());
+            self.csr.store(csr::MTVAL, error.value());
+            
+            let mut status = self.csr.load(csr::MSTATUS);
+            let ie = status & csr::MASK_MIE >> 3;
+            status = status & !csr::MASK_MPIE | (ie << 3);
+            let mpp = mode;
+            status = status & !csr::MASK_MPP | (mpp << 11);
+            self.csr.store(csr::MSTATUS, status);
+        }
+    }
+
     fn execute(&mut self, inst: instructions::R_Instr) -> u64 {
         // Execute instruction 
         match(inst.opcode) {
