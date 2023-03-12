@@ -41,20 +41,32 @@ impl Cpu {
 
     pub fn run(&mut self) {
         while (self.pc < self.bus.dram.dram.len() as u64) {
-            let instr = self.fetch();
+            let instr = match self.fetch() {
+                Ok(instr) => instr as u32,
+                Err(e) => {
+                    self.handle_error(e);
+                    continue;
+                }
+            };
             let instr_decoded = self.decode(instr);
-            let new_pc = self.execute(instr_decoded);
+            let new_pc = match self.execute(instr_decoded) {
+                Ok(pc) => pc,
+                Err(e) => {
+                    self.handle_error(e);
+                    continue;
+                }
+            };
             self.pc = new_pc;
         }
     }
 
-    fn fetch(&self) -> u32 {
+    fn fetch(&self) -> Result<u64, errors::Exception> {
         // Read 32 bit instruction from memory
         let index = self.pc as usize;
         let instr = self.bus.load((index as u64), 32);
         //let instr = (self.dram[index+3] as u32) | ((self.dram[index + 2] as u32) << 8) | ((self.dram[index + 1] as u32) << 16) | ((self.dram[index+0] as u32) << 24);
         
-        return instr as u32;
+        return instr;
     }
 
     fn decode(&self, inst: u32) -> instructions::R_Instr {
@@ -79,6 +91,10 @@ impl Cpu {
     }
 
     pub fn handle_error(&mut self, error: errors::Exception) {
+        if (error.is_fatal()) { 
+            panic!("Fatal exception!");
+        }
+
         let mode = self.mode;
         let pc = self.pc;
 
@@ -125,24 +141,24 @@ impl Cpu {
         }
     }
 
-    fn execute(&mut self, inst: instructions::R_Instr) -> u64 {
+    fn execute(&mut self, inst: instructions::R_Instr) -> Result<u64, errors::Exception> {
         // Execute instruction 
         match(inst.opcode) {
             0x33 => { // ADD (Add rs1 and rs2)
                 // TODO: Worry about overflow from addition
                 self.regs[inst.rd] = self.regs[inst.rs1] + self.regs[inst.rs2];
-                return self.pc + 4;
+                return Ok(self.pc + 4);
             }
             0x13 => { // ADDI (Add rs1 and intermediate value from register)
                 let imm: u64 = ((inst.funct7 as u64) << 5) | inst.rs2 as u64; // Imm value is stored as [funct7][rs2]
                 // TODO: Worry about overflow from addition
                 self.regs[inst.rd] = imm + self.regs[inst.rs1];
-                return self.pc + 4;
+                return Ok(self.pc + 4);
             }
             0x37 => { // LUI (load 12-31 bits into register)
                 let imm = ((inst.funct7 as u64) << 13) | ((inst.rs2 as u64) << 8) | ((inst.rs1 as u64) << 3) | inst.funct3 as u64;
                 self.regs[inst.rd] = (imm << 12);
-                return self.pc + 4;
+                return Ok(self.pc + 4);
             }
             0x73 => { // Diff CSR instructions have the same OP code, but differing rs2/funct7
                 match(inst.rs2, inst.funct7) {
@@ -152,7 +168,7 @@ impl Cpu {
                         let csr_value = temp & !self.regs[inst.rs1];
                         self.csr.store(csr, csr_value);
                         self.regs[inst.rd] = temp;
-                        return self.pc + 4;
+                        return Ok(self.pc + 4);
                     }
                     (0x2, 0x8) => { // sret
                         // Below is just fancy bit manipulation of sstatus to update certain flags
@@ -179,18 +195,18 @@ impl Cpu {
 
                         // Return the program counter position before interrupt, to restore program
                         let SEPC = 0x141; 
-                        return self.csr.load(SEPC) & !0b11;
+                        return Ok(self.csr.load(SEPC) & !0b11);
                     }
                     (_, _) => {
                         println!("CSR instruction not supported yet!");
-                        return self.pc + 4;
+                        return Ok(self.pc + 4);
                     }
                 }
             }
             _ => {
                 println!("Not implemented");
                 println!("Op {} not implemented yet!", inst.opcode);
-                return self.pc + 4;
+                return Ok(self.pc + 4);
             }
         }
     }

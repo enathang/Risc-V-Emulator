@@ -1,4 +1,5 @@
-use std::error::Error;
+use crate::emulator::errors::Exception;
+
 use super::errors;
 
 pub struct Dram {
@@ -12,9 +13,9 @@ impl Dram {
         Self { dram }
     }
 
-    pub fn load(&self, addr: u64, size: u64) -> Result<u64, errors::Thing> {
+    pub fn load(&self, addr: u64, size: u64) -> Result<u64, errors::Exception> {
         if (![8, 16, 32, 64].contains(&size)) {
-            panic!("LoadAccessFault {}", addr);
+            return Err(Exception::LoadAccessFault(addr));
         }
 
         let nbytes = size / 8;
@@ -28,9 +29,9 @@ impl Dram {
         return Ok(code);
     }
 
-    pub fn store(&mut self, addr: u64, size: u64, data: u64) -> Result<(), errors::Thing> {
+    pub fn store(&mut self, addr: u64, size: u64, data: u64) -> Result<(), errors::Exception> {
         if (![8, 16, 32, 64].contains(&size)) {
-            panic!("LoadAccessFault {}", addr);
+            return Err(Exception::StoreAMOAccessFault(addr));
         }
 
         let nbytes = size / 8;
