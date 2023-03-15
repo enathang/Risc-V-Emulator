@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Condvar, Mutex
 };
 use std::thread;
+use super::errors;
 
 pub const UART_SIZE: u64 = 128;
 
@@ -21,29 +22,29 @@ pub const UART_THR_INDEX: u64 = 0;
 // Bit 0 is 1: data is stored in RHR for processing (0 is empty)
 // Bit 5 is 0: THR is full and waiting to be sent out (1 is empty)
 pub const UART_LSR_INDEX: u64 = 5;
-pub const UART_LSR_RHR_STATUS_FLAG: u64 = 1;
-pub const UART_LSR_THR_STATUS_FLAG: u64 = 1 << 5;
+pub const UART_LSR_RHR_STATUS_FLAG: u8 = 1;
+pub const UART_LSR_THR_STATUS_FLAG: u8 = 1 << 5;
 
 pub const UART_BASE: u64 = 0x1000_0000;
 
 pub struct Uart {
-    uart: Arc<(Mutex<[u8; UART_SIZE]>, Condvar)>,
+    uart: Arc<(Mutex<[u8; UART_SIZE as usize]>, Condvar)>,
     interrupt: Arc<AtomicBool>
 }
 
 impl Uart {
     pub fn new() -> Self {
-        let mut array = [0; UART_SIZE];
+        let mut array = [0; UART_SIZE as usize];
         let uart = Arc::new((Mutex::new(array), Condvar::new()));
 
         let interrupt = Arc::new(AtomicBool::new(false));
 
-        spawn_io_listener_thread(uart, interrupt);
+        Self::spawn_io_listener_thread(&uart, &interrupt);
 
-        return Uart { array, interrupt};
+        return Uart { uart: uart, interrupt: interrupt};
     }
 
-    fn spawn_io_listener_thread(uart: Arc<(Mutex<[u8; 128]>, Condvar)>, interrupt: Arc<AtomicBool>) {
+    fn spawn_io_listener_thread(uart: &Arc<(Mutex<[u8; 128]>, Condvar)>, interrupt: &Arc<AtomicBool>) {
         let mut byte = [0];
 
         // Create reference to Uart for IO to load data into
@@ -59,22 +60,22 @@ impl Uart {
                     let mut array = uart.lock().unwrap();
 
                     // While the receiver flag (index 0) is set
-                    while (array[UART_LSR_INDEX] & UART_LSR_RHR_STATUS_FLAG == 1) {
+                    while (array[UART_LSR_INDEX as usize] & UART_LSR_RHR_STATUS_FLAG == 1) {
                         // Wait and reload the status register
                         array = cvar.wait(array).unwrap();
                     }
 
                     // Receiver flag is 0, so load next one
-                    array[UART_RHR_INDEX] = byte[0];
+                    array[UART_RHR_INDEX as usize] = byte[0];
                     read_interrupt.store(true, Ordering::Release);
-                    array[UART_LSR_INDEX] |= UART_LSR_RHR_STATUS_FLAG; // Maybe should be at beginning?
+                    array[UART_LSR_INDEX as usize] |= UART_LSR_RHR_STATUS_FLAG; // Maybe should be at beginning?
                 },
                 Err(e) => println!("Error: {}", e),
             }
         });
     }
 
-    pub fn load(&self, addr: u64, size: u64) -> Result<u64, Exception> {
+    pub fn load(&self, addr: u64, size: u64) -> Result<u64, errors::Exception> {
         let (uart, cvar) = &*self.uart;
         let mut array = uart.lock().unwrap(); // Must be mut because we reset flag
         let index = addr - UART_BASE;
@@ -82,14 +83,14 @@ impl Uart {
         match (index) {
             UART_RHR_INDEX => {
                 cvar.notify_one();
-                array[UART_LSR_INDEX] &= !1; // Reset flag
-                return Ok(array[index] as u64);
+                array[UART_LSR_INDEX as usize] &= !1; // Reset flag
+                return Ok(array[index as usize] as u64);
             },
-            _ => return Ok(array[index] as u64),
+            _ => return Ok(array[index as usize] as u64),
         }
     }
 
-    pub fn store(&mut self, addr: u64, size: u64, value: u64) -> Result<(), Exception> {
+    pub fn store(&mut self, addr: u64, size: u64, value: u64) -> Result<(), errors::Exception> {
         let (uart, cvar) = &*self.uart;
         let mut array = uart.lock().unwrap();
 
@@ -102,13 +103,13 @@ impl Uart {
                 return Ok(());
             }
             _ => {
-                array[index] = value;
+                array[index as usize] = value as u8;
                 return Ok(());
             }
         }
     }
 
     pub fn is_interrupting(&self) -> bool {
-        self.interrupt.swap(false, Ordering::Acquire);
+        return self.interrupt.swap(false, Ordering::Acquire);
     }
 }

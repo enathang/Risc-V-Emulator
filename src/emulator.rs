@@ -1,8 +1,10 @@
 mod bus;
 mod csr;
+mod constants;
 mod dram;
 mod errors;
 mod instructions;
+mod uart;
 
 type Mode = u64;
 const User: Mode = 0; // 0b00
