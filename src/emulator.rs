@@ -1,9 +1,13 @@
+use self::csr::*;
+
 mod bus;
 mod csr;
 mod constants;
 mod dram;
 mod errors;
 mod instructions;
+mod interrupt;
+mod plic;
 mod uart;
 
 type Mode = u64;
@@ -59,6 +63,11 @@ impl Cpu {
                 }
             };
             self.pc = new_pc;
+
+            match self.check_pending_interrupt() {
+                Some(interrupt) => self.handle_interrupt(interrupt),
+                None => ()
+            }
         }
     }
 
@@ -90,6 +99,55 @@ impl Cpu {
         for i in (0..self.regs.len()) {
             println!("RegisterNum: {}, RegisterValue: {}", i, self.regs[i]);
         }
+    }
+
+    pub fn handle_interrupt(&mut self, interrupt: interrupt::Interrupt) {
+        let pc = self.pc;
+        let mode = self.mode;
+        let cause = interrupt.code();
+
+        let delegate_to_s_mode = mode != Machine && (self.csr.load(csr::MIDELEG) & (1 << cause) > 0);
+        if (delegate_to_s_mode) {
+            // Determine whether CPU is setup to use vectorized or bare interrupt handling
+            let tvec = self.csr.load(csr::STVEC);
+            if (tvec & 0b11 == 0) {
+                self.pc = tvec & !0b11;
+            } else {
+                self.pc = tvec & !0b11 + cause << 2;
+            }
+
+            // Store state before interrupt to restore later
+            self.csr.store(csr::SEPC, pc);
+            self.csr.store(csr::SCAUSE, cause);
+            self.csr.store(csr::STVAL, 0);
+
+            // Update state to handle interrupt
+            let mut status = self.csr.load(csr::SSTATUS);
+            status |= csr::MASK_SPIE; // If we're handing an interrupt, we can assume SIE=1
+            status &= !csr::MASK_SIE;
+            status = (status & !csr::MASK_SPP) | mode << 8;
+            self.csr.store(csr::SSTATUS, status);
+        } else {
+           let tvec = self.csr.load(csr::MTVEC);
+            if (tvec & 0b11 == 0) {
+                self.pc = tvec & !0b11;
+            } else {
+                self.pc = tvec & !0b11 + cause << 2;
+            }
+
+            // Store state before interrupt to restore later
+            self.csr.store(csr::MEPC, pc);
+            self.csr.store(csr::MCAUSE, cause);
+            self.csr.store(csr::MTVAL, 0);
+
+            // Update state to handle interrupt
+            let mut status = self.csr.load(csr::MSTATUS);
+            status |= csr::MASK_MPIE; // If we're handing an interrupt, we can assume MIE=1
+            status &= !csr::MASK_MIE;
+            status = (status & !csr::MASK_MPP) | mode << 11;
+            self.csr.store(csr::MSTATUS, status);
+        }
+
     }
 
     pub fn handle_error(&mut self, error: errors::Exception) {
@@ -142,6 +200,71 @@ impl Cpu {
             self.csr.store(csr::MSTATUS, status);
         }
     }
+
+    pub fn check_pending_interrupt(&mut self) -> Option<interrupt::Interrupt> {
+        // If MachineMode and machine interrupts disabled, ignore pending interrupts
+        if (self.mode == Machine && (self.csr.load(MSTATUS) & MASK_MIE) == 0) {
+            return None;
+        }
+
+        // If Supervisor mode and supervisor interrupts disabled, ignore pending interrupts
+        if ((self.mode == Supervisor) &&  (self.csr.load(MSTATUS) & MASK_SIE) == 0) {
+            return None;
+        }
+
+        if (self.bus.uart.is_interrupting()) {
+            self.bus.store(plic::PLIC_CLAIM_ADDR, 32, uart::UART_IRQ).unwrap();
+            self.csr.store(csr::MIP, self.csr.load(csr::MIP) | !csr::MASK_SEIP);
+        }
+
+        // Load a list of interrupts that are both enabled and pending
+        let pending = self.csr.load(MIE) & self.csr.load(MIP);
+
+        if (pending & MASK_MEIP) != 0 {
+            self.csr.store(csr::MIP, self.csr.load(csr::MIP) & !MASK_MEIP);
+            return Some(interrupt::Interrupt::MachineExternalInterrupt);
+        }
+
+        if (pending & MASK_MSIP) != 0 {
+            self.csr.store(MIP, self.csr.load(MIP) & !MASK_MSIP);
+            return Some(interrupt::Interrupt::MachineSoftwareInterrupt);
+        }
+
+        if (pending & MASK_MTIP) != 0 {
+            self.csr.store(MIP, self.csr.load(MIP) & !MASK_MTIP);
+            return Some(interrupt::Interrupt::MachineTimerInterrupt);
+        }
+
+        if (pending & MASK_SEIP) != 0 {
+            self.csr.store(MIP, self.csr.load(MIP) & !MASK_SEIP);
+            return Some(interrupt::Interrupt::SupervisorExternalInterrupt);
+        }
+
+        if (pending & MASK_SSIP) != 0 {
+            self.csr.store(MIP, self.csr.load(MIP) & !MASK_SSIP);
+            return Some(interrupt::Interrupt::SupervisorSoftwareInterrupt);
+        }
+
+        if (pending & MASK_STIP) != 0 {
+            self.csr.store(MIP, self.csr.load(MIP) & !MASK_STIP);
+            return Some(interrupt::Interrupt::SupervisorTimerInterrupt);
+        }
+
+        return None;
+    }
+
+    fn get_status_flag(status: &u64, flag_index: u64) -> bool {
+        let flag_mask = (1 << flag_index);
+        return ((status & flag_mask) > 0);
+    }
+
+    /*fn set_status_flag(status: &mut u64, flag_index: u64, val: bool) {
+        // First, reset the flag to 0
+        status = status & !(1 << flag_index);
+
+        // Then, set the flag to val
+        status |= (val << flag_index);
+    }*/
 
     fn execute(&mut self, inst: instructions::R_Instr) -> Result<u64, errors::Exception> {
         // Execute instruction 
@@ -196,8 +319,7 @@ impl Cpu {
                         self.csr.store(csr::SSTATUS, updated_sstatus);
 
                         // Return the program counter position before interrupt, to restore program
-                        let SEPC = 0x141; 
-                        return Ok(self.csr.load(SEPC) & !0b11);
+                        return Ok(self.csr.load(csr::SEPC) & !0b11);
                     }
                     (_, _) => {
                         println!("CSR instruction not supported yet!");

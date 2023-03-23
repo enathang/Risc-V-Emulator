@@ -27,6 +27,8 @@ pub const UART_LSR_THR_STATUS_FLAG: u8 = 1 << 5;
 
 pub const UART_BASE: u64 = 0x1000_0000;
 
+pub const UART_IRQ: u64 = 10;
+
 pub struct Uart {
     uart: Arc<(Mutex<[u8; UART_SIZE as usize]>, Condvar)>,
     interrupt: Arc<AtomicBool>
