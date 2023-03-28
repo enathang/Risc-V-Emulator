@@ -258,6 +258,7 @@ impl Cpu {
         return ((status & flag_mask) > 0);
     }
 
+    // TODO: Update this function
     /*fn set_status_flag(status: &mut u64, flag_index: u64, val: bool) {
         // First, reset the flag to 0
         status = status & !(1 << flag_index);
@@ -269,16 +270,65 @@ impl Cpu {
     fn execute(&mut self, inst: instructions::R_Instr) -> Result<u64, errors::Exception> {
         // Execute instruction 
         match(inst.opcode) {
-            0x33 => { // ADD (Add rs1 and rs2)
-                // TODO: Worry about overflow from addition
-                self.regs[inst.rd] = self.regs[inst.rs1] + self.regs[inst.rs2];
-                return Ok(self.pc + 4);
+            0x33 => {
+                match (inst.funct3) {
+                    0x0 => {
+                        match (inst.funct7) {
+                            0x0 => { // ADD
+                                self.regs[inst.rd] = self.regs[inst.rs1] + self.regs[inst.rs2];
+                            },
+                            _ => { // SUB
+                                self.regs[inst.rd] = self.regs[inst.rs2] - self.regs[inst.rs1];
+                            },
+                        }
+                    }
+                    _ => {}
+                }
             }
-            0x13 => { // ADDI (Add rs1 and intermediate value from register)
-                let imm: u64 = ((inst.funct7 as u64) << 5) | inst.rs2 as u64; // Imm value is stored as [funct7][rs2]
-                // TODO: Worry about overflow from addition
-                self.regs[inst.rd] = imm + self.regs[inst.rs1];
-                return Ok(self.pc + 4);
+            0x13 => {
+                let imm = ((inst.funct7 as u64) << 5) | inst.rs2 as u64;
+                match(inst.funct3) {
+                    0x0 => { // ADDI
+                        // TODO: Worry about overflow from addition
+                        self.regs[inst.rd] = imm + self.regs[inst.rs1];
+                        return Ok(self.pc + 4);
+                    },
+                    0x1 => { // SLLI
+                        let shift = inst.rs2;
+                        self.regs[inst.rd] = self.regs[inst.rs1] << shift;
+                    },
+                    0x2 => { // SLTI (set less than immediate)
+                        let result = ((self.regs[inst.rs1] as i64) < imm as i64);
+                        self.regs[inst.rd] = result as u64;
+                    },
+                    0x3 => { // STLIU
+                        let result = ((self.regs[inst.rs1] as u64) < imm);
+                        self.regs[inst.rd] = result as u64;
+                    },
+                    0x4 => { // XORI
+                        self.regs[inst.rd] = self.regs[inst.rs1] ^ imm;
+                    },
+                    0x5 => {
+                        match(inst.funct7) {
+                            0x0 => { // SRLI (Logical shift right)
+                                let shift = inst.rs2;
+                                self.regs[inst.rd] = self.regs[inst.rs1] >> shift;
+                            }
+                            _ => { // SRAI (Arithmetic shift right)
+                                let sign = self.regs[inst.rs1] & (1 << 31);
+                                let shift = inst.rs2;
+                                self.regs[inst.rd] = (self.regs[inst.rs1] >> shift) | sign;
+                            }
+                        } 
+                    },
+                    0x6 => { // ORI
+                        self.regs[inst.rd] = self.regs[inst.rs1] | imm;
+                    },
+                    0x7 => { // ANDI
+                        self.regs[inst.rd] = self.regs[inst.rs1] & imm;
+                    }
+                    _ => {}
+                }
             }
             0x37 => { // LUI (load 12-31 bits into register)
                 let imm = ((inst.funct7 as u64) << 13) | ((inst.rs2 as u64) << 8) | ((inst.rs1 as u64) << 3) | inst.funct3 as u64;
@@ -332,7 +382,9 @@ impl Cpu {
                 println!("Op {} not implemented yet!", inst.opcode);
                 return Ok(self.pc + 4);
             }
+
         }
+        return Ok(self.pc + 4);
     }
 }
 
@@ -340,33 +392,117 @@ impl Cpu {
 mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
+    use asm_riscv::{I, Reg};
 
-    #[test]
-    fn test_add_decode() {
-        // Op = ADD, rd = 29, rs1 = 0, rs2 = 5
-        let inst = format!("{}{}{}{}{}{}", "0000000", "00101", "00000", "000", "11101", "0010011");
-        let inst_bin = u32::from_str_radix(&inst, 2).unwrap();
-        let mut cpu = Cpu::new(Vec::new());
-        let inst_obj = cpu.decode(inst_bin);
+    fn execute_instructions(cpu: &mut Cpu, instr: &[I]) {
+        for inst in instr.iter() {
+            let machine_code = u32::from(*inst);
+            let d = cpu.decode(machine_code);
 
-        let expected_instr = instructions::R_Instr{ opcode: 0x13, rd: 29, funct3: 0, rs1: 0, rs2: 5, funct7: 0 };
-        assert_eq!(inst_obj, expected_instr);
+            cpu.execute(d);
+        }
     }
 
     #[test]
     fn test_execute_lui() {
         let mut cpu = Cpu::new(Vec::new());
-        assert_eq!(0, cpu.regs[29]);
 
-        let inst = format!("{}{}{}{}{}{}", "1111111", "11111", "11111", "111", "11101", "0110111");
-        let inst_bin = u32::from_str_radix(&inst, 2).unwrap();
-        let inst_obj = cpu.decode(inst_bin);
-        cpu.execute(inst_obj);
+        let instr = [
+            I::LUI { d: Reg::T3, im: 1 },   
+            I::LUI { d: Reg::T4, im: 256 },
+        ];
+        execute_instructions(&mut cpu, &instr);
 
-        let expected_register_value = format!("{}{}{}{}{}{}", "1111111", "11111", "11111", "111", "00000", "0000000");
-        let expected_register_value_bin = u32::from_str_radix(&expected_register_value, 2).unwrap();
+        assert_eq!(cpu.regs[28], 1<<12);
+        assert_eq!(cpu.regs[29], 256<<12);
+    }
 
-        assert_eq!(expected_register_value_bin as u64, cpu.regs[29]);
+    #[test]
+    fn test_execute_add_addi() {
+       let mut cpu = Cpu::new(Vec::new());
+ 
+        let instr = [
+            I::ADDI { d: Reg::T3, s: Reg::T3, im: 3 },
+            I::ADDI { d: Reg::T4, s: Reg::T4, im: 4 },
+            I::ADD { d: Reg::T5, s1: Reg::T3, s2: Reg::T4 }
+        ];
+
+        execute_instructions(&mut cpu, &instr);
+
+        assert_eq!(cpu.regs[28], 3);
+        assert_eq!(cpu.regs[29], 4);
+        assert_eq!(cpu.regs[30], 7);
+    }
+    
+    #[test]
+    fn test_execute_slli_srli() {
+       let mut cpu = Cpu::new(Vec::new());
+ 
+        let instr = [
+            I::ADDI { d: Reg::T4, s: Reg::T4, im: 2 },
+            I::SLLI { d: Reg::T3, s: Reg::T4, im: 1 },
+            I::SRLI { d: Reg::T5, s: Reg::T4, im: 1 },
+        ];
+
+        execute_instructions(&mut cpu, &instr);
+
+        assert_eq!(cpu.regs[28], 4);
+        assert_eq!(cpu.regs[30], 1);
+    }
+
+    #[test]
+    fn test_execute_srai() {
+       let mut cpu = Cpu::new(Vec::new());
+ 
+        let instr = [
+            I::ADDI { d: Reg::T4, s: Reg::T4, im: -2 },
+            I::SRAI { d: Reg::T3, s: Reg::T4, im: 1 },
+        ];
+
+        execute_instructions(&mut cpu, &instr);
+
+        assert_eq!(cpu.regs[28], 2047);
+    }
+
+
+    #[test]
+    fn test_execute_andi_ori_xori() {
+       let mut cpu = Cpu::new(Vec::new());
+ 
+        let instr = [
+            I::ADDI { d: Reg::T4, s: Reg::T4, im: 3 },
+            I::ANDI { d: Reg::T3, s: Reg::T4, im: 5 },
+            I::ORI { d: Reg::T5, s: Reg::T4, im: 4 },
+            I::XORI { d: Reg::T6, s: Reg::T4, im: 3 },
+        ];
+
+
+        execute_instructions(&mut cpu, &instr);
+
+        assert_eq!(cpu.regs[28], 1);
+        assert_eq!(cpu.regs[30], 7);
+        assert_eq!(cpu.regs[31], 0);
+    }
+
+    #[test]
+    fn test_execute_stli_stliu() {
+       let mut cpu = Cpu::new(Vec::new());
+ 
+        let instr = [
+            I::ADDI { d: Reg::T1, s: Reg::T1, im: 3 },
+            I::SLTI { d: Reg::T2, s: Reg::T1, im: 1 },
+            I::SLTI { d: Reg::T3, s: Reg::T1, im: 5 },
+            I::SLTUI { d: Reg::T4, s: Reg::T1, im: 1 },
+            I::SLTUI { d: Reg::T5, s: Reg::T1, im: 5 },
+        ];
+
+        execute_instructions(&mut cpu, &instr);
+
+        assert_eq!(cpu.regs[6], 3);
+        assert_eq!(cpu.regs[7], 0);
+        assert_eq!(cpu.regs[28], 1);
+        assert_eq!(cpu.regs[29], 0);
+        assert_eq!(cpu.regs[30], 1);
     }
 
     #[test]
